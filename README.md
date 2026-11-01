@@ -1,220 +1,204 @@
-# Grok AI Algorithmic Trading Platform
+# AlphaTradePro
 
-An institutional-grade algorithmic trading platform with integrated Grok AI (xAI), featuring a Next.js frontend, FastAPI backend, SQLAlchemy database, and Fyers API integration.
+Institutional algorithmic trading for the Indian markets, connected **exclusively** to
+**Kotak Neo Trade API** and the **Kotak Neo WebSocket feed**.
 
-## Features
+No simulated prices, no demo data, no placeholder option chains. Every figure on every screen
+comes from Kotak Neo. When the broker is unreachable, the interface says so — it never fills
+the gap with invented numbers.
 
-### 🧠 Grok AI Integration
-- **xAI API Integration**: Connects to Grok via OpenAI SDK with `base_url="https://api.x.ai/v1"`
-- **Strategy Generation**: AI-generated trading strategies with risk management
-- **Auto-Optimizer**: Automatically optimizes strategies based on market conditions
-- **Memory System**: Learns from past failures via `AILearningLog` table
-- **Memory Injection**: Before generating new strategies, Grok reads past failures to avoid repeating mistakes
+---
 
-### 📊 Trading Features
-- **Paper Trading**: Simulated order execution with stop-loss/take-profit
-- **Live Trading**: Fyers API integration for live order placement
-- **Portfolio Management**: Track PnL, win rate, and active positions
-- **Real-time Data**: WebSocket live ticks and historical candle data
-- **Trade Logging**: Complete audit trail of all trades
+## Read this first: the historical-data limitation
 
-### 🖥️ Frontend (Next.js + Tailwind + shadcn/ui)
-- **Dashboard**: Equity curve, PnL cards, win rate, active strategies
-- **Grok AI**: Split-screen chat interface with auto-optimizer
-- **Grok Brain**: View AI failures, lessons, and learning history
-- **Strategy Lab**: Strategy management with deploy to paper/live
-- **Live Terminal**: Buy/sell panel with live WebSocket ticker
-- **Dark Theme**: Glassmorphism with neon accents
+**Kotak Neo publishes no historical candle API.** Its quote endpoints are live-only, and the
+scrip master is static reference data, not price history.
 
-## Project Structure
+That has one honest consequence: a backtester can only be honest if the platform records the
+tape itself. So AlphaTradePro does exactly that:
+
+* every incoming quote is written to a `ticks` table (`backend/marketdata/ticks.py`),
+* candles are aggregated from those ticks on read, at 1m/3m/5m/15m/30m/60m/1d,
+* charts, indicators, backtests and the algo engine all read that recorded data,
+* and the API reports coverage explicitly, so you always know how much real history exists.
+
+This is a genuine architectural constraint, not an omission. A backtest over synthetic candles
+would be fiction; a backtest over recorded ticks is real. History accumulates from the moment you
+start recording, and gets better every session.
+
+---
+
+## Architecture
 
 ```
-Fyers-/
-├── backend/
-│   ├── app/
-│   │   ├── api/v1/          # API routes (grok, trading, fyers)
-│   │   ├── core/            # Core configuration
-│   │   ├── db/
-│   │   │   ├── models/      # SQLAlchemy models
-│   │   │   ├── session.py   # Database session
-│   │   │   └── init_db.py   # DB initialization
-│   │   ├── grok_ai/
-│   │   │   └── agent.py     # Grok AI agent with memory
-│   │   ├── services/
-│   │   │   ├── fyers_service.py
-│   │   │   └── paper_trade_service.py
-│   │   ├── schemas/         # Pydantic schemas
-│   │   └── main.py          # FastAPI app entrypoint
-│   ├── alembic/             # DB migrations
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── venv/
-├── frontend/
-│   ├── app/
-│   │   ├── brain/           # AI memory page
-│   │   ├── dashboard/       # Dashboard page
-│   │   ├── grok/            # Grok AI chat page
-│   │   ├── strategies/      # Strategy management
-│   │   └── terminal/        # Live trading terminal
-│   ├── components/
-│   │   ├── ui/              # shadcn/ui components
-│   │   ├── layout/          # Sidebar, TopBar
-│   │   └── chat/            # Grok chat component
-│   ├── lib/                 # API client, utils
-│   ├── store/               # Zustand state management
-│   ├── types/               # TypeScript types
-│   ├── package.json
-│   ├── tailwind.config.js
-│   ├── tsconfig.json
-│   └── Dockerfile
-├── .env.example             # Environment variables template
-├── docker-compose.yml       # Full stack deployment
-├── setup.sh                 # Initial setup script
-├── start.sh                 # Start both servers
-└── README.md
+browser (Next.js 15, dark desk, PWA)
+   │  HTTPS / WSS  (one origin via nginx)
+   ▼
+nginx ── /            → Next.js standalone        :3000
+       ├─ /api/        → FastAPI                  :8000
+       └─ /ws/market   → FastAPI WebSocket feed
+                              │
+                              ▼
+                       Kotak Neo Trade API  (TOTP + MPIN session)
+                       Kotak Neo WebSocket  (tick feed)
 ```
 
-## Quick Start
-
-### Option 1: Using Setup Script
-
-```bash
-# Clone the repository
-cd Fyers-
-
-# Make scripts executable
-chmod +x setup.sh start.sh
-
-# Run setup (installs dependencies, initializes DB)
-./setup.sh
-
-# Edit .env with your API keys
-nano .env
-
-# Start the platform
-./start.sh
+```
+backend/
+  core/        config, security (PBKDF2 + JWT), vault (Fernet), database (SQLite)
+  broker/      neo_auth (session manager), accounts (credential registry)
+  marketdata/  master (scrip sync), quotes (cache), ticks (recorder), feed (socket), market_hours
+  strategies/  indicators, dsl (no-code engine), templates
+  options/     chain (Black-Scholes Greeks, PCR, max pain)
+  backtesting/ engine
+  papertrading/engine
+  execution/   live (Kotak routing), algo (runner), charges (Indian slabs)
+  risk/        engine (limits, kill switch)
+  analytics/   metrics (Sharpe, Sortino, CAGR, drawdown)
+  alerts/      service (Telegram, WhatsApp, email)
+  ai/          coach (deterministic patterns + optional LLM)
+  api/         routes, deps (auth/RBAC), ws
 ```
 
-### Option 2: Manual Setup
+---
 
-**Backend:**
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp ../.env.example .env
-# Edit .env with your keys
-python -c "from app.db.init_db import init_db; init_db()"
-uvicorn app.main:app --reload --port 8000
+## Quick start
+
+### 1. Install
+
+```sh
+git clone <your-repo> alphatrade && cd alphatrade
+
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r backend/requirements.txt
+pip install "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client"
 ```
 
-**Frontend:**
-```bash
-cd frontend
-npm install
-npm run dev
+### 2. Generate secrets
+
+```sh
+python - <<'PY'
+import secrets
+for name in ("SECRET_KEY", "CREDENTIAL_ENCRYPTION_KEY", "JWT_SECRET"):
+    print(f"{name}={secrets.token_urlsafe(48)}")
+PY
 ```
 
-### Docker Deployment
+### 3. Configure
 
-```bash
-docker-compose up -d
+```sh
+cp backend/.env.example .env
 ```
 
-## Environment Variables
+Set at minimum:
 
-Create a `.env` file in the root directory:
+| Variable | Meaning |
+| --- | --- |
+| `SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `JWT_SECRET` | From the command above |
+| `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` | The first admin, created on first boot |
+| `KOTAK_CONSUMER_KEY` | Kotak Neo → invest → trade API card |
+| `KOTAK_TOTP_KEY`, `KOTAK_MOBILE_NUMBER`, `KOTAK_MPIN`, `KOTAK_UCC` | From your Kotak Neo account |
 
-```env
-XAI_API_KEY=your_xai_api_key
-FYERS_CLIENT_ID=your_fyers_client_id
-FYERS_ACCESS_TOKEN=your_fyers_access_token
-FYERS_CLIENT_SECRET=your_fyers_client_secret
-DATABASE_URL=sqlite:///./grok_trading.db
-SECRET_KEY=your_secret_key
-NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
-NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
+**Get the consumer key right.** Kotak rejects an unknown key with
+`Consumer key … does not exist`, and every market-data and order call then fails. Generate a
+fresh one from the Kotak Neo app rather than reusing a sample from a tutorial.
+
+### 4. Run
+
+```sh
+# API
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Terminal
+cd web && npm install && npm run dev
 ```
 
-## API Endpoints
+Open <http://localhost:3000>, sign in with the bootstrap admin, then visit **Settings →
+Sync symbol master** (or call `POST /api/v1/market/sync-master`) to load the instrument master
+from Kotak.
 
-### Grok AI
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/grok/chat` | Chat with Grok AI |
-| POST | `/api/grok/auto-optimize` | Auto-optimize strategies |
-| GET | `/api/grok/memory` | Get AI learning memory |
+---
 
-### Trading
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/trading/dashboard/stats` | Dashboard statistics |
-| GET/POST | `/api/trading/tradelogs` | Trade logs |
-| GET/POST | `/api/trading/strategies` | Strategies |
-| GET/POST | `/api/trading/paper-trades` | Paper trades |
-| POST | `/api/trading/paper-trades/{id}/check-sl-tp` | Check SL/TP |
-| GET | `/api/trading/ai-learning-log` | AI learning log |
+## Deployment
 
-### Fyers
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/fyers/profile` | User profile |
-| GET | `/api/fyers/quotes` | Live quotes |
-| GET/POST | `/api/fyers/candles` | Historical candles |
-| POST | `/api/fyers/orders` | Place order |
-| GET | `/api/fyers/orders` | Order book |
-| GET | `/api/fyers/positions` | Positions |
-| GET | `/api/fyers/funds` | Funds/Margin |
+See **[DEPLOY.md](DEPLOY.md)** for Docker Compose, systemd, nginx and CI/CD.
 
-### WebSocket
-| Endpoint | Description |
-|----------|-------------|
-| `ws://localhost:8000/ws/live-ticks` | Live market data ticks |
+Short version, the three things that make it "always running":
 
-## Database Models
+1. **Auto-restart** — `restart: unless-stopped` in Compose, `Restart=always` in systemd.
+2. **Self-healing broker session** — `backend/broker/neo_auth.py` caches the Neo session,
+   re-authenticates when it expires, and a keepalive thread refreshes it every 5 minutes.
+3. **External liveness check** — point a free cron service at `/api/v1/system/health`.
 
-### TradeLog
-Records all executed trades with symbol, side, quantity, prices, PnL, and strategy.
+---
 
-### Strategy
-Stores strategy definitions, rules, indicators, win rate, and active status.
+## Security
 
-### PaperTrade
-Simulated trades with stop-loss/take-profit tracking and auto-close logic.
+* Passwords hashed with PBKDF2-HMAC-SHA256 (240k rounds).
+* JWT access tokens, HS256, verified in constant time.
+* API keys stored hashed; the plaintext is shown exactly once.
+* Kotak secrets encrypted at rest with Fernet. Without `CREDENTIAL_ENCRYPTION_KEY` the vault
+  refuses to persist — it never falls back to plaintext.
+* Roles: `viewer` (read), `trader` (orders, API keys, paper), `admin` (users, risk limits).
+* Live orders need the feature gate **and** the typed phrase `PLACE LIVE ORDER` **and** a passing
+  risk check.
+* The kill switch blocks every new order and halts running strategies until released.
 
-### AIConversation
-Chat history between user and Grok AI.
+> **The API has no user-facing login of its own beyond the app's JWT session.** Anything that can
+> reach the app can reach the order endpoints. Put authentication in front of it (Cloudflare
+> Access, Tailscale, basic auth) before exposing it to the internet.
 
-### AILearningLog
-**Critical for AI memory**: Records failed trades with context, reason, and lessons learned.
+---
 
-## Grok AI Memory System
+## Testing
 
-The platform includes a learning feedback loop:
+```sh
+PYTHONPATH=. python backend/_smoke_indicators.py   # 41 checks
+PYTHONPATH=. python backend/_smoke_options.py      # 38 checks
+PYTHONPATH=. python backend/_smoke_engine.py       # 91 checks
+PYTHONPATH=. python backend/_smoke_api.py          # 57 checks
 
-1. **Trade Fails**: A paper trade hits stop-loss or generates negative PnL
-2. **Log to Memory**: The failure is recorded in `AILearningLog` with:
-   - Strategy used
-   - Mistake context (what happened)
-   - Reason failed (e.g., "High Slippage", "False Breakout")
-   - Market conditions at the time
-   - Lesson learned
-3. **Inject into Prompt**: Before generating new strategies, Grok reads the last 5 failures
-4. **Improve**: New strategies are generated with explicit instructions to avoid past mistakes
+cd web && npx tsc --noEmit && npm run build
+```
 
-## Screenshots
+The engine tests use synthetic candles **on purpose and only in tests**, to prove the maths and
+the wiring. Nothing in `backend/` generates market data at runtime.
 
-- **Dashboard**: Portfolio overview with equity curve
-- **Grok AI**: Chat interface with strategy generation
-- **Grok Brain**: Transparent view of AI learning
-- **Strategy Lab**: Deploy strategies to paper/live
-- **Live Terminal**: Real-time order execution
+---
 
-## License
+## Environment variables
 
-MIT License
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ENVIRONMENT` | `development` | `production` enables stricter behaviour |
+| `POSTGRES_DSN`, `REDIS_URL` | — | Optional; SQLite needs no server |
+| `DATA_DIR` | `./var` | Where tick and state databases live |
+| `KOTAK_ENVIRONMENT` | `prod` | `prod` or `uat` |
+| `KOTAK_KEEPALIVE`, `KOTAK_KEEPALIVE_SECONDS` | `1`, `300` | Session refresh loop |
+| `KOTAK_SESSION_TTL_SECONDS` | `2700` | Force re-login after this age |
+| `RECORD_TICKS`, `TICK_RETENTION_DAYS` | `1`, `30` | Tape recording |
+| `BREADTH_UNIVERSE_SIZE` | `200` | Instruments scanned for breadth |
+| `ENABLE_LIVE_TRADING` | `0` | Master switch for real orders |
+| `ENABLE_PAPER_TRADING` | `1` | Paper engine |
+| `ENABLE_BACKTEST` | `1` | Backtester |
+| `ENABLE_ALGO_EXECUTION` | `0` | Deploying strategies to trade |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | Telegram alerts |
+| `WHATSAPP_API_KEY`, `WHATSAPP_SENDER`, `WHATSAPP_RECIPIENT` | — | WhatsApp alerts |
+| `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD` | — | Email alerts |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | — | Optional LLM layer of the AI coach |
 
-## Disclaimer
+---
 
-Trading in financial markets involves substantial risk of loss. This software is for educational and research purposes only. Use at your own risk. The authors are not responsible for any financial losses incurred.
+## Scope and honesty
+
+* **Market data and execution are Kotak Neo only.** There is no fallback broker and no fallback
+  data source.
+* **Greeks are computed**, using exchange-reported IV or an IV backed out of the traded premium
+  by bisection. They are never assumed.
+* **The AI coach reviews process, not markets.** It detects patterns in your own trade history
+  and never proposes a trade. The optional LLM sees only numbers already computed locally and has
+  no broker access.
+* **Risk limits are on by default** with conservative values, so the engine blocks reckless orders
+  from the first trade rather than after a loss.
+* **This is not investment advice.** It is trading infrastructure. You are responsible for every
+  order it sends.
