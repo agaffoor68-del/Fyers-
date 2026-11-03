@@ -21,6 +21,9 @@ pyotp>=2.9,<3
 qrcode>=7.4,<9
 pillow>=10,<12
 
+# Market data provider (Fyers API v3). Replaces Angel One SmartAPI.
+fyers-apiv3
+
 # Alert delivery.
 # (Telegram and WhatsApp use the stdlib; SMTP is in the stdlib too.)
 
